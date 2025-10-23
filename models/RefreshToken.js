@@ -7,18 +7,12 @@ const refreshTokenSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
-    token: {
-      type: String,
-      required: true,
-    },
-    expiresAt: {
-      type: Date,
-      required: true,
-    },
+    token: { type: String, required: true },
+    expiresAt: { type: Date, required: true },
+    userAgent: { type: String }, // Optional: track browser/device
+    ip: { type: String }, // Optional: track IP
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
 
 export default mongoose.model("RefreshToken", refreshTokenSchema);
