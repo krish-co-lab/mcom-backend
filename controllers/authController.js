@@ -11,13 +11,23 @@ import sendEmail from "../utils/sendEmail.js";
 import RefreshToken from "../models/RefreshToken.js";
 
 /**
- * @desc    Register new user
- * @route   POST /api/auth/register
- * @access  Public
+ * Cookie Options (for HttpOnly Refresh Token)
+ */
+const cookieOptions = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production", // only true in production (HTTPS)
+  sameSite: "strict",
+  path: "/",
+  maxAge: ms(process.env.REFRESH_TOKEN_EXPIRE || "7d"),
+};
+
+/**
+ * @desc Register new user
+ * @route POST /api/auth/register
+ * @access Public
  */
 export const registerUser = asyncHandler(async (req, res) => {
   const { name, email, password } = req.body;
-
   if (!name || !email || !password)
     throw new Error("All fields (name, email, password) are required");
 
@@ -29,9 +39,7 @@ export const registerUser = asyncHandler(async (req, res) => {
   const accessToken = generateAccessToken(user);
   const refreshToken = generateRefreshToken(user);
 
-  const expiresAt = new Date(
-    Date.now() + ms(process.env.REFRESH_TOKEN_EXPIRE || "7d")
-  );
+  const expiresAt = new Date(Date.now() + cookieOptions.maxAge);
 
   await RefreshToken.create({
     token: refreshToken,
@@ -40,12 +48,14 @@ export const registerUser = asyncHandler(async (req, res) => {
     ip: req.ip,
     userAgent: req.get("user-agent"),
   });
+
+  // ✅ Store refresh token in HttpOnly cookie
+  res.cookie("refreshToken", refreshToken, cookieOptions);
 
   res.status(201).json({
     success: true,
     message: "Registration successful",
     accessToken,
-    refreshToken,
     user: {
       id: user._id,
       name: user.name,
@@ -56,29 +66,24 @@ export const registerUser = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Login user
- * @route   POST /api/auth/login
- * @access  Public
+ * @desc Login user
+ * @route POST /api/auth/login
+ * @access Public
  */
 export const loginUser = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
-
   if (!email || !password) throw new Error("Email and password are required");
 
   const user = await User.findOne({ email }).select("+password");
-  if (!user) throw new Error("Invalid email or password");
+  if (!user || !(await user.matchPassword(password)))
+    throw new Error("Invalid email or password");
 
-  const isMatch = await user.matchPassword(password);
-  if (!isMatch) throw new Error("Invalid email or password");
-
-  // Rotate tokens — delete old ones for this user
+  // Delete old tokens for same user (rotation)
   await RefreshToken.deleteMany({ user: user._id });
 
   const accessToken = generateAccessToken(user);
   const refreshToken = generateRefreshToken(user);
-  const expiresAt = new Date(
-    Date.now() + ms(process.env.REFRESH_TOKEN_EXPIRE || "7d")
-  );
+  const expiresAt = new Date(Date.now() + cookieOptions.maxAge);
 
   await RefreshToken.create({
     token: refreshToken,
@@ -88,11 +93,13 @@ export const loginUser = asyncHandler(async (req, res) => {
     userAgent: req.get("user-agent"),
   });
 
+  // ✅ Store refresh token securely in cookie
+  res.cookie("refreshToken", refreshToken, cookieOptions);
+
   res.json({
     success: true,
     message: "Login successful",
     accessToken,
-    refreshToken,
     user: {
       id: user._id,
       name: user.name,
@@ -103,13 +110,13 @@ export const loginUser = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Refresh access token
- * @route   POST /api/auth/refresh
- * @access  Public
+ * @desc Refresh access token
+ * @route POST /api/auth/refresh
+ * @access Public
  */
 export const refreshToken = asyncHandler(async (req, res) => {
-  const { token } = req.body;
-  if (!token) throw new Error("No refresh token provided");
+  const token = req.cookies.refreshToken;
+  if (!token) throw new Error("No refresh token found");
 
   const stored = await RefreshToken.findOne({ token });
   if (!stored) throw new Error("Invalid refresh token");
@@ -133,22 +140,24 @@ export const refreshToken = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Logout user
- * @route   POST /api/auth/logout
- * @access  Public
+ * @desc Logout user
+ * @route POST /api/auth/logout
+ * @access Public
  */
 export const logoutUser = asyncHandler(async (req, res) => {
-  const { token } = req.body;
-  if (!token) throw new Error("Token is required for logout");
+  const token = req.cookies.refreshToken;
+  if (token) await RefreshToken.findOneAndDelete({ token });
 
-  await RefreshToken.findOneAndDelete({ token });
+  // ✅ Clear the cookie on logout
+  res.clearCookie("refreshToken", cookieOptions);
+
   res.json({ success: true, message: "Logged out successfully" });
 });
 
 /**
- * @desc    Forgot password - send reset email
- * @route   POST /api/auth/forgot-password
- * @access  Public
+ * @desc Forgot password
+ * @route POST /api/auth/forgot-password
+ * @access Public
  */
 export const forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
@@ -187,9 +196,9 @@ export const forgotPassword = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Reset password
- * @route   PUT /api/auth/reset-password/:token
- * @access  Public
+ * @desc Reset password
+ * @route PUT /api/auth/reset-password/:token
+ * @access Public
  */
 export const resetPassword = asyncHandler(async (req, res) => {
   const resetPasswordToken = crypto
@@ -210,4 +219,29 @@ export const resetPassword = asyncHandler(async (req, res) => {
   await user.save();
 
   res.json({ success: true, message: "Password reset successful" });
+});
+
+/**
+ * @desc    Get current logged-in user
+ * @route   GET /api/auth/me
+ * @access  Private (requires token)
+ */
+export const getMe = asyncHandler(async (req, res) => {
+  // req.user is set in protect middleware
+  if (!req.user) {
+    res.status(401);
+    throw new Error("User not authorized");
+  }
+
+  res.status(200).json({
+    success: true,
+    user: {
+      id: req.user._id,
+      name: req.user.name,
+      email: req.user.email,
+      role: req.user.role,
+      createdAt: req.user.createdAt,
+      updatedAt: req.user.updatedAt,
+    },
+  });
 });

@@ -7,8 +7,10 @@ import {
   loginUser,
   refreshToken,
   logoutUser,
+  getMe,
 } from "../controllers/authController.js";
 import { authLimiter } from "../middleware/rateLimiter.js";
+import { protect } from "../middleware/auth.js";
 
 const router = express.Router();
 
@@ -40,6 +42,7 @@ router.post(
 );
 
 router.post("/refresh", refreshToken);
+router.get("/me", protect, getMe);
 router.post("/logout", logoutUser);
 
 export default router;
